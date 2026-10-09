@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rusty ADB
+Comment=ADB and scrcpy multitool for app management and debloating
+Exec=rusty-adb
+Icon=rusty-adb
+Categories=Development;Utility;
+StartupWMClass=rusty-adb

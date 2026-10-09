@@ -944,8 +944,8 @@ impl eframe::App for App {
                 for (t, n) in [
                     (Tab::Apps, "📦 Apps"),
                     (Tab::Mirror, "🖥 Mirror"),
-                    (Tab::Debloat, "🧹 Debloat"),
-                    (Tab::Tools, "🧰 Tools"),
+                    (Tab::Debloat, "🗑 Debloat"),
+                    (Tab::Tools, "🔧 Tools"),
                     (Tab::Shell, "⌨ Shell"),
                 ] {
                     ui.selectable_value(&mut self.tab, t, n);
@@ -1020,9 +1020,19 @@ fn removal_color(r: Removal) -> Color32 {
     }
 }
 
+fn app_icon() -> egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("embedded icon is valid")
+        .to_rgba8();
+    egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() }
+}
+
 fn main() -> eframe::Result {
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 700.0])
+            .with_app_id("rusty-adb")
+            .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native(
