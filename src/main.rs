@@ -69,8 +69,41 @@ struct Scrcpy {
     on_top: bool,
     fullscreen: bool,
     show_touches: bool,
+    camera: bool,
+    cam_facing: &'static str,
+    cam_id: String,
+    cam_size: String,
+    cam_fps: String,
+    cam_torch: bool,
+    webcam: bool,
+    v4l2_dev: String,
+    hide_preview: bool,
+    v4l2: Vec<(String, String, bool)>,
     child: Option<Child>,
 }
+
+/// Video devices as (path, name, is_virtual). Virtual ones are v4l2loopback candidates.
+fn v4l2_devices() -> Vec<(String, String, bool)> {
+    let mut v: Vec<_> = std::fs::read_dir("/sys/class/video4linux")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("video").then_some(n)
+        })
+        .map(|n| {
+            let dir = format!("/sys/class/video4linux/{n}");
+            let name = std::fs::read_to_string(format!("{dir}/name")).unwrap_or_default().trim().to_string();
+            let virt = std::fs::canonicalize(&dir).is_ok_and(|p| p.to_string_lossy().contains("/virtual/"));
+            (format!("/dev/{n}"), name, virt)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+const LOOPBACK_CMD: &str = "sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=\"Android Cam\" exclusive_caps=1";
 
 struct App {
     tx: Sender<Msg>,
@@ -193,6 +226,16 @@ impl App {
                 on_top: false,
                 fullscreen: false,
                 show_touches: false,
+                camera: false,
+                cam_facing: "back",
+                cam_id: String::new(),
+                cam_size: String::new(),
+                cam_fps: String::new(),
+                cam_torch: false,
+                webcam: false,
+                v4l2_dev: "/dev/video10".into(),
+                hide_preview: true,
+                v4l2: v4l2_devices(),
                 child: None,
             },
         };
@@ -391,6 +434,28 @@ impl App {
         ] {
             if !val.trim().is_empty() {
                 cmd.arg(flag).arg(val.trim());
+            }
+        }
+        if c.camera {
+            cmd.arg("--video-source=camera");
+            if c.cam_id.trim().is_empty() {
+                cmd.arg(format!("--camera-facing={}", c.cam_facing));
+            } else {
+                cmd.arg(format!("--camera-id={}", c.cam_id.trim()));
+            }
+            for (flag, val) in [("--camera-size", &c.cam_size), ("--camera-fps", &c.cam_fps)] {
+                if !val.trim().is_empty() {
+                    cmd.arg(format!("{flag}={}", val.trim()));
+                }
+            }
+            if c.cam_torch {
+                cmd.arg("--camera-torch");
+            }
+        }
+        if c.webcam {
+            cmd.arg(format!("--v4l2-sink={}", c.v4l2_dev.trim()));
+            if c.hide_preview {
+                cmd.arg("--no-playback");
             }
         }
         for (on, flag) in [
@@ -755,7 +820,86 @@ impl App {
     }
 
     fn mirror_tab(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let mut list_cams = false;
         let c = &mut self.scrcpy;
+        ui.horizontal(|ui| {
+            ui.label("Source:");
+            ui.selectable_value(&mut c.camera, false, "🖥 Screen");
+            ui.selectable_value(&mut c.camera, true, "📷 Device camera");
+        });
+        if c.camera {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Facing:");
+                    for f in ["back", "front", "external"] {
+                        ui.selectable_value(&mut c.cam_facing, f, f);
+                    }
+                    ui.label("or camera id:");
+                    ui.add(egui::TextEdit::singleline(&mut c.cam_id).desired_width(40.0));
+                    ui.label("Size:");
+                    ui.add(egui::TextEdit::singleline(&mut c.cam_size).hint_text("1920x1080").desired_width(90.0));
+                    ui.label("FPS:");
+                    ui.add(egui::TextEdit::singleline(&mut c.cam_fps).hint_text("30").desired_width(40.0));
+                    ui.checkbox(&mut c.cam_torch, "Torch");
+                });
+                list_cams = ui.button("List cameras").clicked();
+                ui.label(RichText::new("Camera mirroring needs Android 12+.").small().weak());
+            });
+        }
+        if list_cams {
+            let serial = self.serial.clone();
+            self.spawn(&ctx, move |tx| {
+                let mut cmd = Command::new("scrcpy");
+                if let Some(s) = &serial {
+                    cmd.args(["-s", s]);
+                }
+                let out = cmd.arg("--list-cameras").output();
+                let _ = tx.send(Msg::Log(match out {
+                    Ok(o) => String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).trim().to_string(),
+                    Err(e) => format!("scrcpy: {e}"),
+                }));
+            });
+        }
+        let c = &mut self.scrcpy;
+        ui.group(|ui| {
+            ui.checkbox(&mut c.webcam, "Use as a webcam (Linux v4l2 virtual camera)");
+            if c.webcam {
+                ui.horizontal(|ui| {
+                    ui.label("Device:");
+                    egui::ComboBox::from_id_salt("v4l2")
+                        .selected_text(c.v4l2_dev.clone())
+                        .show_ui(ui, |ui| {
+                            for (path, name, virt) in c.v4l2.clone() {
+                                let label = format!("{path}  {name}{}", if virt { "  (virtual)" } else { "" });
+                                ui.selectable_value(&mut c.v4l2_dev, path, label);
+                            }
+                        });
+                    ui.add(egui::TextEdit::singleline(&mut c.v4l2_dev).desired_width(110.0));
+                    if ui.small_button("⟳").on_hover_text("Rescan video devices").clicked() {
+                        c.v4l2 = v4l2_devices();
+                    }
+                    ui.checkbox(&mut c.hide_preview, "Hide preview window");
+                });
+                if !c.v4l2.iter().any(|d| d.2) {
+                    ui.colored_label(
+                        Color32::from_rgb(235, 170, 70),
+                        "No virtual camera found. Install v4l2loopback (Arch: v4l2loopback-dkms) and load it:",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.monospace(LOOPBACK_CMD);
+                        if ui.small_button("📋 Copy").clicked() {
+                            ui.ctx().copy_text(LOOPBACK_CMD.to_string());
+                        }
+                    });
+                }
+                ui.label(
+                    RichText::new("Works with screen or camera source. Apps then see it as a camera; consider 'No audio'.")
+                        .small()
+                        .weak(),
+                );
+            }
+        });
         egui::Grid::new("scrcpy").num_columns(2).show(ui, |ui| {
             for (label, val, hint) in [
                 ("Max size (px)", &mut c.max_size, "e.g. 1024"),
