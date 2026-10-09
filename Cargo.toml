@@ -2,6 +2,8 @@
 name = "rusty-adb"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/FierraCodes/rust-adbtools"
 
 [dependencies]
 apk-info = "1.0.13"

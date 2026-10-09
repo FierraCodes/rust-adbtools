@@ -9,6 +9,7 @@
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white)
 ![GUI](https://img.shields.io/badge/GUI-egui%20%2F%20eframe-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?logo=linux&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
 ![ADB](https://img.shields.io/badge/requires-adb-3DDC84?logo=android&logoColor=white)
 ![scrcpy](https://img.shields.io/badge/requires-scrcpy-informational)
 
@@ -75,8 +76,8 @@ sudo pacman -S android-tools scrcpy
 ### Build & install
 
 ```bash
-git clone https://github.com/<your-user>/rusty-adb.git
-cd rusty-adb
+git clone https://github.com/FierraCodes/rust-adbtools.git
+cd rust-adbtools
 ./install.sh
 ```
 
@@ -149,6 +150,10 @@ Commands run on worker threads and report back over a channel, so the UI stays r
 
 Removing system packages can break your device. Back up first, start with **recommended**
 entries, and know how to restore. You use this tool at your own risk.
+
+## 📄 License
+
+Released under the [MIT License](LICENSE).
 
 ## 🙏 Credits
 
