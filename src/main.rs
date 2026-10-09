@@ -823,6 +823,18 @@ impl App {
         let ctx = ui.ctx().clone();
         let mut list_cams = false;
         let c = &mut self.scrcpy;
+        if ui
+            .button("⚡ Low-latency preset")
+            .on_hover_text("720p, 30 fps, 4M bitrate, no audio. Big camera sizes (e.g. 4096x3072) add a lot of delay.")
+            .clicked()
+        {
+            c.cam_size = "1280x720".into();
+            c.cam_fps = "30".into();
+            c.max_size = "1280".into();
+            c.max_fps = "30".into();
+            c.bitrate = "4M".into();
+            c.no_audio = true;
+        }
         ui.horizontal(|ui| {
             ui.label("Source:");
             ui.selectable_value(&mut c.camera, false, "🖥 Screen");
