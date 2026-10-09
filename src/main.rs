@@ -1,6 +1,8 @@
 mod adb;
+mod debloat;
 
 use adb::{Device, Package};
+use debloat::{Safety, Vendor};
 use eframe::egui::{self, Color32, RichText};
 use std::collections::{BTreeSet, HashMap};
 use std::process::{Child, Command};
@@ -15,6 +17,7 @@ enum Msg {
     Shell(String),
     Busy(bool),
     Icon(String, Option<egui::ColorImage>),
+    Manufacturer(String),
 }
 
 enum IconState {
@@ -27,6 +30,7 @@ enum IconState {
 enum Tab {
     Apps,
     Mirror,
+    Debloat,
     Tools,
     Shell,
 }
@@ -37,6 +41,7 @@ enum Filter {
     User,
     System,
     Disabled,
+    Removed,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -90,6 +95,13 @@ struct App {
     shell_cmd: String,
     shell_out: String,
     scrcpy: Scrcpy,
+    deb_vendor: Option<Vendor>,
+    deb_safe_only: bool,
+    deb_disable: bool,
+    deb_sel: BTreeSet<String>,
+    deb_confirm: bool,
+    manufacturer: String,
+    need_refresh: bool,
     icons: HashMap<String, IconState>,
     icon_tx: Sender<(String, String, String)>,
     ctx: egui::Context,
@@ -142,6 +154,13 @@ impl App {
             out_dir: home,
             shell_cmd: String::new(),
             shell_out: String::new(),
+            deb_vendor: None,
+            deb_safe_only: false,
+            deb_disable: false,
+            deb_sel: BTreeSet::new(),
+            deb_confirm: false,
+            manufacturer: String::new(),
+            need_refresh: false,
             icons: HashMap::new(),
             icon_tx,
             ctx: ctx.clone(),
@@ -191,12 +210,17 @@ impl App {
 
     fn refresh_packages(&mut self, ctx: &egui::Context) {
         let Some(s) = self.serial.clone() else { return };
-        self.spawn(ctx, move |tx| match adb::packages(&s) {
-            Ok(p) => {
-                let _ = tx.send(Msg::Packages(p));
+        self.spawn(ctx, move |tx| {
+            if let Ok(m) = adb::shell(&s, "getprop ro.product.manufacturer") {
+                let _ = tx.send(Msg::Manufacturer(m));
             }
-            Err(e) => {
-                let _ = tx.send(Msg::Log(format!("packages: {e}")));
+            match adb::packages(&s) {
+                Ok(p) => {
+                    let _ = tx.send(Msg::Packages(p));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Log(format!("packages: {e}")));
+                }
             }
         });
     }
@@ -240,6 +264,7 @@ impl App {
                         self.packages.clear();
                         self.selected.clear();
                         self.icons.clear();
+                        self.need_refresh = self.serial.is_some();
                     }
                     self.devices = d;
                 }
@@ -250,6 +275,10 @@ impl App {
                 Msg::Info(i) => self.info = i,
                 Msg::Shell(o) => self.shell_out = o,
                 Msg::Busy(b) => self.busy = b,
+                Msg::Manufacturer(m) => {
+                    self.deb_vendor = Vendor::detect(&m);
+                    self.manufacturer = m;
+                }
                 Msg::Icon(pkg, img) => {
                     let st = match img {
                         Some(i) => IconState::Ready(self.ctx.load_texture(&pkg, i, Default::default())),
@@ -267,9 +296,8 @@ impl App {
         }
     }
 
-    fn run_bulk(&mut self, ctx: &egui::Context, op: Bulk) {
+    fn run_bulk(&mut self, ctx: &egui::Context, op: Bulk, pkgs: Vec<String>) {
         let Some(s) = self.serial.clone() else { return };
-        let pkgs: Vec<String> = self.selected.iter().cloned().collect();
         let keep = self.keep_data;
         let out = self.out_dir.clone();
         self.spawn(ctx, move |tx| {
@@ -286,6 +314,18 @@ impl App {
                     Bulk::Stop => adb::shell(&s, &format!("am force-stop {p}")),
                     Bulk::Pull => adb::pull_apks(&s, p, &out),
                 };
+                if r.is_ok() {
+                    let action = match op {
+                        Bulk::Uninstall => Some("uninstall"),
+                        Bulk::Disable => Some("disable"),
+                        Bulk::Enable => Some("enable"),
+                        Bulk::Restore => Some("restore"),
+                        _ => None,
+                    };
+                    if let Some(a) = action {
+                        adb::log_action(&s, p, a);
+                    }
+                }
                 let _ = tx.send(Msg::Log(match r {
                     Ok(o) => format!("{p}: {o}"),
                     Err(e) => format!("{p}: ERROR {e}"),
@@ -359,6 +399,7 @@ impl App {
                 (Filter::User, "User"),
                 (Filter::System, "System"),
                 (Filter::Disabled, "Disabled"),
+                (Filter::Removed, "Removed"),
                 (Filter::All, "All"),
             ] {
                 ui.selectable_value(&mut self.filter, f, n);
@@ -376,6 +417,7 @@ impl App {
                 Filter::User => !p.system,
                 Filter::System => p.system,
                 Filter::Disabled => p.disabled,
+                Filter::Removed => p.removed,
             })
             .filter(|p| q.is_empty() || p.name.to_lowercase().contains(&q))
             .cloned()
@@ -406,7 +448,7 @@ impl App {
                         if matches!(op, Bulk::Uninstall | Bulk::Clear) {
                             self.confirm = Some(op);
                         } else {
-                            self.run_bulk(&ctx, op);
+                            { let p = self.selected.iter().cloned().collect(); self.run_bulk(&ctx, op, p); }
                         }
                     }
                 }
@@ -433,7 +475,9 @@ impl App {
                         }
                         self.icon(ui, p, 22.0);
                         let mut t = RichText::new(&p.name);
-                        if p.disabled {
+                        if p.removed {
+                            t = t.color(Color32::from_rgb(200, 90, 90)).strikethrough();
+                        } else if p.disabled {
                             t = t.color(Color32::GRAY).strikethrough();
                         } else if p.system {
                             t = t.color(Color32::from_rgb(230, 190, 110));
@@ -501,6 +545,153 @@ impl App {
         egui::ScrollArea::vertical().id_salt("info").show(ui, |ui| {
             ui.monospace(&self.info);
         });
+    }
+
+    fn debloat_tab(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        if self.packages.is_empty() {
+            ui.label("No package list yet. Select a device and press Refresh on the Apps tab.");
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "Device: {}",
+                if self.manufacturer.is_empty() { "?" } else { &self.manufacturer }
+            ));
+            egui::ComboBox::from_id_salt("vendor")
+                .selected_text(self.deb_vendor.map_or("All lists", Vendor::name))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.deb_vendor, None, "All lists");
+                    for v in Vendor::ALL {
+                        ui.selectable_value(&mut self.deb_vendor, Some(v), v.name());
+                    }
+                });
+            ui.checkbox(&mut self.deb_safe_only, "Safe only");
+            ui.separator();
+            ui.radio_value(&mut self.deb_disable, false, "Uninstall (user 0)");
+            ui.radio_value(&mut self.deb_disable, true, "Disable");
+        });
+
+        // Entries present on this device and not already removed.
+        let rows: Vec<(&debloat::Entry, Package)> = debloat::LIST
+            .iter()
+            .filter(|e| self.deb_vendor.is_none_or(|v| v == e.vendor))
+            .filter(|e| !self.deb_safe_only || e.safety == Safety::Safe)
+            .filter_map(|e| {
+                let p = self.packages.iter().find(|p| p.name == e.pkg)?;
+                let active = if self.deb_disable { !p.disabled && !p.removed } else { !p.removed };
+                active.then(|| (e, p.clone()))
+            })
+            .collect();
+        let pkgs: Vec<String> = rows.iter().map(|(e, _)| e.pkg.to_string()).collect();
+        self.deb_sel.retain(|s| pkgs.contains(s));
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{} known packages found, {} selected", rows.len(), self.deb_sel.len()));
+            if ui.small_button("Select all safe").clicked() {
+                self.deb_sel.extend(
+                    rows.iter().filter(|(e, _)| e.safety == Safety::Safe).map(|(e, _)| e.pkg.to_string()),
+                );
+            }
+            if ui.small_button("Clear").clicked() {
+                self.deb_sel.clear();
+            }
+            if ui.small_button("Export selection…").clicked() {
+                if let Some(f) = rfd::FileDialog::new().set_file_name("debloat.txt").save_file() {
+                    let txt: Vec<&str> = self.deb_sel.iter().map(String::as_str).collect();
+                    self.log.push(match std::fs::write(&f, txt.join("\n")) {
+                        Ok(_) => format!("exported {} packages to {}", txt.len(), f.display()),
+                        Err(e) => format!("export: {e}"),
+                    });
+                }
+            }
+            if ui.small_button("Import list…").clicked() {
+                if let Some(f) = rfd::FileDialog::new().pick_file() {
+                    match std::fs::read_to_string(&f) {
+                        Ok(t) => {
+                            let n0 = self.deb_sel.len();
+                            self.deb_sel.extend(
+                                t.lines().map(str::trim).filter(|l| pkgs.iter().any(|p| p == l)).map(String::from),
+                            );
+                            self.log.push(format!("imported {} matching packages", self.deb_sel.len() - n0));
+                        }
+                        Err(e) => self.log.push(format!("import: {e}")),
+                    }
+                }
+            }
+            let label = if self.deb_disable { "Disable selected" } else { "Uninstall selected" };
+            if ui
+                .add_enabled(!self.deb_sel.is_empty(), egui::Button::new(RichText::new(label).strong()))
+                .clicked()
+            {
+                self.deb_confirm = true;
+            }
+        });
+        ui.label(
+            RichText::new("Removal is per-user and reversible: Apps → Removed → Restore. Actions are logged to ~/.config/rusty-adb/actions.log")
+                .small()
+                .weak(),
+        );
+        ui.separator();
+
+        let row_h = 22.0 + ui.spacing().item_spacing.y;
+        egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, row_h, rows.len(), |ui, range| {
+            for (e, p) in &rows[range] {
+                ui.horizontal(|ui| {
+                    let mut sel = self.deb_sel.contains(e.pkg);
+                    if ui.checkbox(&mut sel, "").changed() {
+                        if sel {
+                            self.deb_sel.insert(e.pkg.to_string());
+                        } else {
+                            self.deb_sel.remove(e.pkg);
+                        }
+                    }
+                    self.icon(ui, &p, 22.0);
+                    let (txt, col) = match e.safety {
+                        Safety::Safe => ("safe", Color32::from_rgb(110, 200, 120)),
+                        Safety::Caution => ("caution", Color32::from_rgb(235, 170, 70)),
+                    };
+                    ui.label(RichText::new(txt).color(col).small());
+                    ui.label(e.desc).on_hover_text(format!("{} · {}", e.pkg, e.vendor.name()));
+                    ui.label(RichText::new(e.pkg).weak().small());
+                });
+            }
+        });
+
+        if self.deb_confirm {
+            let n = self.deb_sel.len();
+            let cautions = debloat::LIST
+                .iter()
+                .filter(|e| e.safety == Safety::Caution && self.deb_sel.contains(e.pkg))
+                .count();
+            egui::Window::new("Confirm debloat")
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(&ctx, |ui| {
+                    ui.label(format!(
+                        "{} {n} package(s)?",
+                        if self.deb_disable { "Disable" } else { "Uninstall for user 0:" }
+                    ));
+                    if cautions > 0 {
+                        ui.colored_label(
+                            Color32::from_rgb(235, 170, 70),
+                            format!("{cautions} marked 'caution' may break features (calls, SMS, updates, notifications)."),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Yes").clicked() {
+                            self.deb_confirm = false;
+                            let op = if self.deb_disable { Bulk::Disable } else { Bulk::Uninstall };
+                            let sel: Vec<String> = self.deb_sel.iter().cloned().collect();
+                            self.deb_sel.clear();
+                            self.run_bulk(&ctx, op, sel);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.deb_confirm = false;
+                        }
+                    });
+                });
+        }
     }
 
     fn mirror_tab(&mut self, ui: &mut egui::Ui) {
@@ -656,6 +847,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll();
+        if self.need_refresh {
+            self.need_refresh = false;
+            self.refresh_packages(&ctx);
+        }
         if self.scrcpy.child.is_some() || self.busy {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -698,6 +893,7 @@ impl eframe::App for App {
                 for (t, n) in [
                     (Tab::Apps, "📦 Apps"),
                     (Tab::Mirror, "🖥 Mirror"),
+                    (Tab::Debloat, "🧹 Debloat"),
                     (Tab::Tools, "🧰 Tools"),
                     (Tab::Shell, "⌨ Shell"),
                 ] {
@@ -727,6 +923,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
             Tab::Apps => self.apps_tab(ui),
             Tab::Mirror => self.mirror_tab(ui),
+            Tab::Debloat => self.debloat_tab(ui),
             Tab::Tools => self.tools_tab(ui),
             Tab::Shell => self.shell_tab(ui),
         });
@@ -744,7 +941,7 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         if ui.button("Yes").clicked() {
                             self.confirm = None;
-                            self.run_bulk(&ctx, op);
+                            { let p = self.selected.iter().cloned().collect(); self.run_bulk(&ctx, op, p); }
                         }
                         if ui.button("Cancel").clicked() {
                             self.confirm = None;

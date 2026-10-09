@@ -24,6 +24,8 @@ pub struct Package {
     pub apk: String,
     pub system: bool,
     pub disabled: bool,
+    /// Uninstalled for the current user but still present in the system image.
+    pub removed: bool,
 }
 
 /// Run `adb [-s serial] args...` and return stdout (or stderr text on failure).
@@ -48,6 +50,24 @@ pub fn run(serial: Option<&str>, args: &[&str]) -> Result<String, String> {
 
 pub fn shell(serial: &str, cmd: &str) -> Result<String, String> {
     run(Some(serial), &["shell", cmd])
+}
+
+/// Append a record of a successful debloat action so it can be reviewed or reverted.
+pub fn log_action(serial: &str, pkg: &str, action: &str) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let dir = std::path::PathBuf::from(home).join(".config/rusty-adb");
+    let _ = std::fs::create_dir_all(&dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("actions.log"))
+    {
+        let _ = std::io::Write::write_all(&mut f, format!("{ts}\t{serial}\t{action}\t{pkg}\n").as_bytes());
+    }
 }
 
 pub fn devices() -> Result<Vec<Device>, String> {
@@ -84,6 +104,7 @@ pub fn packages(serial: &str) -> Result<Vec<Package>, String> {
     let all = shell(serial, "pm list packages -f -u")?;
     let user = pkg_set(serial, "-3");
     let disabled = pkg_set(serial, "-d");
+    let installed = pkg_set(serial, "");
     let mut v: Vec<Package> = all
         .lines()
         .filter_map(|l| l.trim().strip_prefix("package:"))
@@ -95,6 +116,7 @@ pub fn packages(serial: &str) -> Result<Vec<Package>, String> {
                 apk: apk.to_string(),
                 system: !user.contains(name),
                 disabled: disabled.contains(name),
+                removed: !installed.contains(name),
             })
         })
         .collect();
