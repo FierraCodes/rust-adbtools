@@ -1,74 +1,115 @@
-//! Built-in list of commonly removed preinstalled packages.
-//! Removal uses `pm uninstall --user 0`, which is reversible (Restore), but "Caution"
-//! entries can break features such as calls, SMS, push notifications or updates.
+//! Debloat package database.
+//!
+//! The primary source is the Universal Android Debloater Next Generation list
+//! (https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation),
+//! downloaded at runtime and cached on disk. A small built-in list is the offline fallback.
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Safety {
-    Safe,
-    Caution,
+use serde::Deserialize;
+use std::collections::HashMap;
+
+pub const SOURCE_URL: &str = "https://raw.githubusercontent.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation/main/resources/assets/uad_lists.json";
+const MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Deserialize, Default)]
+pub enum Removal {
+    #[default]
+    Recommended,
+    Advanced,
+    Expert,
+    Unsafe,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Vendor {
-    Google,
-    Samsung,
-    Xiaomi,
-    Huawei,
-    Social,
-    Misc,
-}
-
-impl Vendor {
-    pub const ALL: [Vendor; 6] = [
-        Vendor::Google,
-        Vendor::Samsung,
-        Vendor::Xiaomi,
-        Vendor::Huawei,
-        Vendor::Social,
-        Vendor::Misc,
-    ];
+impl Removal {
+    pub const ALL: [Removal; 4] = [Removal::Recommended, Removal::Advanced, Removal::Expert, Removal::Unsafe];
 
     pub fn name(self) -> &'static str {
         match self {
-            Vendor::Google => "Google",
-            Vendor::Samsung => "Samsung",
-            Vendor::Xiaomi => "Xiaomi",
-            Vendor::Huawei => "Huawei/Honor",
-            Vendor::Social => "Social & 3rd party",
-            Vendor::Misc => "AOSP/misc",
-        }
-    }
-
-    /// Map `ro.product.manufacturer` to the matching vendor list, if any.
-    pub fn detect(manufacturer: &str) -> Option<Vendor> {
-        let m = manufacturer.to_lowercase();
-        if m.contains("samsung") {
-            Some(Vendor::Samsung)
-        } else if ["xiaomi", "redmi", "poco"].iter().any(|k| m.contains(k)) {
-            Some(Vendor::Xiaomi)
-        } else if ["huawei", "honor"].iter().any(|k| m.contains(k)) {
-            Some(Vendor::Huawei)
-        } else {
-            None
+            Removal::Recommended => "recommended",
+            Removal::Advanced => "advanced",
+            Removal::Expert => "expert",
+            Removal::Unsafe => "unsafe",
         }
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(default)]
 pub struct Entry {
-    pub pkg: &'static str,
-    pub vendor: Vendor,
-    pub safety: Safety,
-    pub desc: &'static str,
+    pub list: String,
+    pub description: String,
+    pub dependencies: Vec<String>,
+    #[serde(rename = "neededBy")]
+    pub needed_by: Vec<String>,
+    pub removal: Removal,
 }
 
-const fn e(pkg: &'static str, vendor: Vendor, safety: Safety, desc: &'static str) -> Entry {
-    Entry { pkg, vendor, safety, desc }
+pub type Db = HashMap<String, Entry>;
+
+pub fn parse(json: &str) -> Result<Db, String> {
+    serde_json::from_str(json).map_err(|e| format!("bad debloat list: {e}"))
 }
 
-use Safety::{Caution as C, Safe as S};
-use Vendor::{Google as G, Huawei as H, Misc as M, Samsung as Sm, Social as So, Xiaomi as X};
+fn cache_file() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".cache/rusty-adb/uad_lists.json")
+}
 
-pub static LIST: &[Entry] = &[
+/// Cached list and whether it is old enough (or missing) to warrant a re-download.
+pub fn load_cached() -> (Option<Db>, bool) {
+    let path = cache_file();
+    let db = std::fs::read_to_string(&path).ok().and_then(|t| parse(&t).ok());
+    let stale = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age.as_secs() > MAX_AGE_SECS);
+    let missing = db.is_none();
+    (db, missing || stale)
+}
+
+/// Download the latest list, validate it, and cache it.
+pub fn download() -> Result<Db, String> {
+    let text = ureq::get(SOURCE_URL)
+        .call()
+        .map_err(|e| format!("download failed: {e}"))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("download failed: {e}"))?;
+    let db = parse(&text)?;
+    let path = cache_file();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, text);
+    Ok(db)
+}
+
+pub fn builtin() -> Db {
+    BUILTIN
+        .iter()
+        .map(|&(pkg, list, removal, desc)| {
+            (
+                pkg.to_string(),
+                Entry { list: list.into(), description: desc.into(), removal, ..Default::default() },
+            )
+        })
+        .collect()
+}
+
+use Removal::{Advanced as C, Recommended as S};
+
+const G: &str = "Google";
+const H: &str = "Oem";
+const X: &str = "Oem";
+const SM: &str = "Oem";
+const SO: &str = "Misc";
+const M: &str = "Aosp";
+
+const fn e(pkg: &'static str, list: &'static str, removal: Removal, desc: &'static str) -> (&'static str, &'static str, Removal, &'static str) {
+    (pkg, list, removal, desc)
+}
+
+static BUILTIN: &[(&str, &str, Removal, &str)] = &[
     // Google
     e("com.google.android.apps.tachyon", G, S, "Google Meet / Duo"),
     e("com.google.android.apps.magazines", G, S, "Google News"),
@@ -96,46 +137,46 @@ pub static LIST: &[Entry] = &[
     e("com.google.android.dialer", G, C, "Phone (may be your only dialer)"),
     e("com.google.android.partnersetup", G, C, "Partner setup"),
     // Social / third party
-    e("com.facebook.katana", So, S, "Facebook"),
-    e("com.facebook.orca", So, S, "Messenger"),
-    e("com.facebook.system", So, S, "Facebook system stub"),
-    e("com.facebook.appmanager", So, S, "Facebook App Manager"),
-    e("com.facebook.services", So, S, "Facebook Services"),
-    e("com.instagram.android", So, S, "Instagram"),
-    e("com.netflix.mediaclient", So, S, "Netflix"),
-    e("com.netflix.partner.activation", So, S, "Netflix partner activation"),
-    e("com.spotify.music", So, S, "Spotify"),
-    e("com.amazon.mShop.android.shopping", So, S, "Amazon Shopping"),
-    e("com.linkedin.android", So, S, "LinkedIn"),
-    e("com.zhiliaoapp.musically", So, S, "TikTok"),
-    e("com.microsoft.office.officehubrow", So, S, "Microsoft 365 (Office)"),
-    e("com.microsoft.skydrive", So, S, "OneDrive"),
-    e("com.microsoft.office.outlook", So, S, "Outlook"),
-    e("com.microsoft.appmanager", So, S, "Link to Windows"),
+    e("com.facebook.katana", SO, S, "Facebook"),
+    e("com.facebook.orca", SO, S, "Messenger"),
+    e("com.facebook.system", SO, S, "Facebook system stub"),
+    e("com.facebook.appmanager", SO, S, "Facebook App Manager"),
+    e("com.facebook.services", SO, S, "Facebook Services"),
+    e("com.instagram.android", SO, S, "Instagram"),
+    e("com.netflix.mediaclient", SO, S, "Netflix"),
+    e("com.netflix.partner.activation", SO, S, "Netflix partner activation"),
+    e("com.spotify.music", SO, S, "Spotify"),
+    e("com.amazon.mShop.android.shopping", SO, S, "Amazon Shopping"),
+    e("com.linkedin.android", SO, S, "LinkedIn"),
+    e("com.zhiliaoapp.musically", SO, S, "TikTok"),
+    e("com.microsoft.office.officehubrow", SO, S, "Microsoft 365 (Office)"),
+    e("com.microsoft.skydrive", SO, S, "OneDrive"),
+    e("com.microsoft.office.outlook", SO, S, "Outlook"),
+    e("com.microsoft.appmanager", SO, S, "Link to Windows"),
     // Samsung
-    e("com.samsung.android.bixby.agent", Sm, S, "Bixby"),
-    e("com.samsung.android.bixby.wakeup", Sm, S, "Bixby voice wake-up"),
-    e("com.samsung.android.app.spage", Sm, S, "Bixby Home / Samsung Free"),
-    e("com.samsung.android.visionintelligence", Sm, S, "Bixby Vision"),
-    e("com.samsung.android.game.gamehome", Sm, S, "Game Launcher"),
-    e("com.samsung.android.game.gametools", Sm, S, "Game Tools"),
-    e("com.samsung.android.arzone", Sm, S, "AR Zone"),
-    e("com.samsung.android.ardrawing", Sm, S, "AR Doodle"),
-    e("com.samsung.android.aremoji", Sm, S, "AR Emoji"),
-    e("com.samsung.android.stickercenter", Sm, S, "Sticker Center"),
-    e("com.samsung.android.app.tips", Sm, S, "Tips"),
-    e("com.samsung.android.app.sharelive", Sm, S, "Quick Share (Share Live)"),
-    e("com.samsung.android.mateagent", Sm, S, "Galaxy Friends"),
-    e("com.samsung.android.kidsinstaller", Sm, S, "Samsung Kids installer"),
-    e("com.samsung.android.app.watchmanagerstub", Sm, S, "Galaxy Wearable stub"),
-    e("com.samsung.android.themestore", Sm, S, "Galaxy Themes"),
-    e("com.sec.android.app.sbrowser", Sm, S, "Samsung Internet"),
-    e("com.samsung.android.email.provider", Sm, S, "Samsung Email"),
-    e("com.sec.android.easyMover", Sm, S, "Smart Switch"),
-    e("com.sec.android.daemonapp", Sm, S, "Samsung Weather"),
-    e("com.samsung.android.app.galaxyfinder", Sm, S, "Finder"),
-    e("com.samsung.android.samsungpass", Sm, C, "Samsung Pass"),
-    e("com.samsung.android.app.routines", Sm, C, "Bixby Routines / Modes"),
+    e("com.samsung.android.bixby.agent", SM, S, "Bixby"),
+    e("com.samsung.android.bixby.wakeup", SM, S, "Bixby voice wake-up"),
+    e("com.samsung.android.app.spage", SM, S, "Bixby Home / Samsung Free"),
+    e("com.samsung.android.visionintelligence", SM, S, "Bixby Vision"),
+    e("com.samsung.android.game.gamehome", SM, S, "Game Launcher"),
+    e("com.samsung.android.game.gametools", SM, S, "Game Tools"),
+    e("com.samsung.android.arzone", SM, S, "AR Zone"),
+    e("com.samsung.android.ardrawing", SM, S, "AR Doodle"),
+    e("com.samsung.android.aremoji", SM, S, "AR Emoji"),
+    e("com.samsung.android.stickercenter", SM, S, "Sticker Center"),
+    e("com.samsung.android.app.tips", SM, S, "Tips"),
+    e("com.samsung.android.app.sharelive", SM, S, "Quick Share (Share Live)"),
+    e("com.samsung.android.mateagent", SM, S, "Galaxy Friends"),
+    e("com.samsung.android.kidsinstaller", SM, S, "Samsung Kids installer"),
+    e("com.samsung.android.app.watchmanagerstub", SM, S, "Galaxy Wearable stub"),
+    e("com.samsung.android.themestore", SM, S, "Galaxy Themes"),
+    e("com.sec.android.app.sbrowser", SM, S, "Samsung Internet"),
+    e("com.samsung.android.email.provider", SM, S, "Samsung Email"),
+    e("com.sec.android.easyMover", SM, S, "Smart Switch"),
+    e("com.sec.android.daemonapp", SM, S, "Samsung Weather"),
+    e("com.samsung.android.app.galaxyfinder", SM, S, "Finder"),
+    e("com.samsung.android.samsungpass", SM, C, "Samsung Pass"),
+    e("com.samsung.android.app.routines", SM, C, "Bixby Routines / Modes"),
     // Xiaomi
     e("com.miui.analytics", X, S, "MIUI analytics"),
     e("com.miui.msa.global", X, S, "MIUI system ads"),
@@ -190,3 +231,19 @@ pub static LIST: &[Entry] = &[
     e("com.android.stk", M, C, "SIM toolkit (some carriers need it)"),
     e("com.android.cellbroadcastreceiver", M, C, "Emergency / cell broadcast alerts"),
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore]
+    fn live_download_matches_device() {
+        let db = super::download().unwrap();
+        let s = crate::adb::devices().unwrap()[0].serial.clone();
+        let pk = crate::adb::packages(&s).unwrap();
+        let hits: Vec<_> = pk.iter().filter_map(|p| db.get(&p.name).map(|e| (&p.name, e.removal))).collect();
+        println!("db {} entries, device {} pkgs, {} known", db.len(), pk.len(), hits.len());
+        for r in super::Removal::ALL {
+            println!("{r:?}: {}", hits.iter().filter(|h| h.1 == r).count());
+        }
+    }
+}

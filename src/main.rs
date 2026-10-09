@@ -2,7 +2,7 @@ mod adb;
 mod debloat;
 
 use adb::{Device, Package};
-use debloat::{Safety, Vendor};
+use debloat::Removal;
 use eframe::egui::{self, Color32, RichText};
 use std::collections::{BTreeSet, HashMap};
 use std::process::{Child, Command};
@@ -18,6 +18,7 @@ enum Msg {
     Busy(bool),
     Icon(String, Option<egui::ColorImage>),
     Manufacturer(String),
+    Db(Result<debloat::Db, String>),
 }
 
 enum IconState {
@@ -95,8 +96,11 @@ struct App {
     shell_cmd: String,
     shell_out: String,
     scrcpy: Scrcpy,
-    deb_vendor: Option<Vendor>,
-    deb_safe_only: bool,
+    db: debloat::Db,
+    db_status: String,
+    deb_list: Option<String>,
+    deb_levels: [bool; 4],
+    deb_search: String,
     deb_disable: bool,
     deb_sel: BTreeSet<String>,
     deb_confirm: bool,
@@ -154,8 +158,11 @@ impl App {
             out_dir: home,
             shell_cmd: String::new(),
             shell_out: String::new(),
-            deb_vendor: None,
-            deb_safe_only: false,
+            db: debloat::builtin(),
+            db_status: "built-in list (offline)".into(),
+            deb_list: None,
+            deb_levels: [true, true, false, false],
+            deb_search: String::new(),
             deb_disable: false,
             deb_sel: BTreeSet::new(),
             deb_confirm: false,
@@ -181,7 +188,25 @@ impl App {
             },
         };
         app.refresh_devices();
+        let (cached, stale) = debloat::load_cached();
+        if let Some(db) = cached {
+            app.db_status = format!("UAD list (cached), {} entries", db.len());
+            app.db = db;
+        }
+        if stale {
+            app.update_db();
+        }
         app
+    }
+
+    fn update_db(&mut self) {
+        self.db_status = "downloading list…".into();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(Msg::Db(debloat::download()));
+            ctx.request_repaint();
+        });
     }
 
     /// Run `f` on a worker thread; it can send messages back through `tx`.
@@ -276,9 +301,15 @@ impl App {
                 Msg::Shell(o) => self.shell_out = o,
                 Msg::Busy(b) => self.busy = b,
                 Msg::Manufacturer(m) => {
-                    self.deb_vendor = Vendor::detect(&m);
                     self.manufacturer = m;
                 }
+                Msg::Db(r) => match r {
+                    Ok(db) => {
+                        self.db_status = format!("UAD list, {} entries", db.len());
+                        self.db = db;
+                    }
+                    Err(e) => self.log.push(format!("debloat list: {e}")),
+                },
                 Msg::Icon(pkg, img) => {
                     let st = match img {
                         Some(i) => IconState::Ready(self.ctx.load_texture(&pkg, i, Default::default())),
@@ -555,42 +586,58 @@ impl App {
         }
         ui.horizontal_wrapped(|ui| {
             ui.label(format!(
-                "Device: {}",
-                if self.manufacturer.is_empty() { "?" } else { &self.manufacturer }
+                "Device: {} · {}",
+                if self.manufacturer.is_empty() { "?" } else { &self.manufacturer },
+                self.db_status
             ));
-            egui::ComboBox::from_id_salt("vendor")
-                .selected_text(self.deb_vendor.map_or("All lists", Vendor::name))
+            if ui.small_button("⟳ Update list").clicked() {
+                self.update_db();
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("🔍");
+            ui.add(egui::TextEdit::singleline(&mut self.deb_search).desired_width(160.0));
+            egui::ComboBox::from_id_salt("dlist")
+                .selected_text(self.deb_list.clone().unwrap_or_else(|| "All lists".into()))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.deb_vendor, None, "All lists");
-                    for v in Vendor::ALL {
-                        ui.selectable_value(&mut self.deb_vendor, Some(v), v.name());
+                    ui.selectable_value(&mut self.deb_list, None, "All lists");
+                    for l in ["Oem", "Google", "Aosp", "Carrier", "Misc"] {
+                        ui.selectable_value(&mut self.deb_list, Some(l.to_string()), l);
                     }
                 });
-            ui.checkbox(&mut self.deb_safe_only, "Safe only");
+            for (i, r) in Removal::ALL.iter().enumerate() {
+                ui.checkbox(&mut self.deb_levels[i], RichText::new(r.name()).color(removal_color(*r)));
+            }
             ui.separator();
             ui.radio_value(&mut self.deb_disable, false, "Uninstall (user 0)");
             ui.radio_value(&mut self.deb_disable, true, "Disable");
         });
 
-        // Entries present on this device and not already removed.
-        let rows: Vec<(&debloat::Entry, Package)> = debloat::LIST
+        // Known packages present on this device and not already removed.
+        let q = self.deb_search.to_lowercase();
+        let mut rows: Vec<(String, debloat::Entry, Package)> = self
+            .packages
             .iter()
-            .filter(|e| self.deb_vendor.is_none_or(|v| v == e.vendor))
-            .filter(|e| !self.deb_safe_only || e.safety == Safety::Safe)
-            .filter_map(|e| {
-                let p = self.packages.iter().find(|p| p.name == e.pkg)?;
+            .filter_map(|p| {
+                let e = self.db.get(&p.name)?;
                 let active = if self.deb_disable { !p.disabled && !p.removed } else { !p.removed };
-                active.then(|| (e, p.clone()))
+                let list_ok = self.deb_list.as_ref().is_none_or(|l| *l == e.list);
+                let level_ok = self.deb_levels[e.removal as usize];
+                let search_ok = q.is_empty()
+                    || p.name.to_lowercase().contains(&q)
+                    || e.description.to_lowercase().contains(&q);
+                (active && list_ok && level_ok && search_ok).then(|| (p.name.clone(), e.clone(), p.clone()))
             })
             .collect();
-        let pkgs: Vec<String> = rows.iter().map(|(e, _)| e.pkg.to_string()).collect();
-        self.deb_sel.retain(|s| pkgs.contains(s));
+        rows.sort_by(|a, b| a.1.removal.cmp(&b.1.removal).then(a.0.cmp(&b.0)));
+        let visible: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        self.deb_sel.retain(|s| visible.contains(&s.as_str()));
 
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!("{} known packages found, {} selected", rows.len(), self.deb_sel.len()));
-            if ui.small_button("Select all safe").clicked() {
+            ui.label(format!("{} matches, {} selected", rows.len(), self.deb_sel.len()));
+            if ui.small_button("Select all recommended").clicked() {
                 self.deb_sel.extend(
-                    rows.iter().filter(|(e, _)| e.safety == Safety::Safe).map(|(e, _)| e.pkg.to_string()),
+                    rows.iter().filter(|r| r.1.removal == Removal::Recommended).map(|r| r.0.clone()),
                 );
             }
             if ui.small_button("Clear").clicked() {
@@ -611,7 +658,7 @@ impl App {
                         Ok(t) => {
                             let n0 = self.deb_sel.len();
                             self.deb_sel.extend(
-                                t.lines().map(str::trim).filter(|l| pkgs.iter().any(|p| p == l)).map(String::from),
+                                t.lines().map(str::trim).filter(|l| visible.contains(l)).map(String::from),
                             );
                             self.log.push(format!("imported {} matching packages", self.deb_sel.len() - n0));
                         }
@@ -636,34 +683,38 @@ impl App {
 
         let row_h = 22.0 + ui.spacing().item_spacing.y;
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, row_h, rows.len(), |ui, range| {
-            for (e, p) in &rows[range] {
+            for (name, e, p) in &rows[range] {
                 ui.horizontal(|ui| {
-                    let mut sel = self.deb_sel.contains(e.pkg);
+                    let mut sel = self.deb_sel.contains(name);
                     if ui.checkbox(&mut sel, "").changed() {
                         if sel {
-                            self.deb_sel.insert(e.pkg.to_string());
+                            self.deb_sel.insert(name.clone());
                         } else {
-                            self.deb_sel.remove(e.pkg);
+                            self.deb_sel.remove(name);
                         }
                     }
-                    self.icon(ui, &p, 22.0);
-                    let (txt, col) = match e.safety {
-                        Safety::Safe => ("safe", Color32::from_rgb(110, 200, 120)),
-                        Safety::Caution => ("caution", Color32::from_rgb(235, 170, 70)),
-                    };
-                    ui.label(RichText::new(txt).color(col).small());
-                    ui.label(e.desc).on_hover_text(format!("{} · {}", e.pkg, e.vendor.name()));
-                    ui.label(RichText::new(e.pkg).weak().small());
+                    self.icon(ui, p, 22.0);
+                    ui.label(RichText::new(e.removal.name()).color(removal_color(e.removal)).small());
+                    let tip = format!(
+                        "{}\n\n[{}]{}{}",
+                        e.description,
+                        e.list,
+                        if e.dependencies.is_empty() { String::new() } else { format!("\nDepends on: {}", e.dependencies.join(", ")) },
+                        if e.needed_by.is_empty() { String::new() } else { format!("\nNeeded by: {}", e.needed_by.join(", ")) },
+                    );
+                    ui.label(name).on_hover_text(tip);
+                    let first = e.description.lines().next().unwrap_or("");
+                    ui.label(RichText::new(first).weak().small());
                 });
             }
         });
 
         if self.deb_confirm {
             let n = self.deb_sel.len();
-            let cautions = debloat::LIST
-                .iter()
-                .filter(|e| e.safety == Safety::Caution && self.deb_sel.contains(e.pkg))
-                .count();
+            let count = |r: Removal| {
+                self.deb_sel.iter().filter(|s| self.db.get(*s).is_some_and(|e| e.removal == r)).count()
+            };
+            let (expert, unsafe_) = (count(Removal::Expert), count(Removal::Unsafe));
             egui::Window::new("Confirm debloat")
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -672,11 +723,11 @@ impl App {
                         "{} {n} package(s)?",
                         if self.deb_disable { "Disable" } else { "Uninstall for user 0:" }
                     ));
-                    if cautions > 0 {
-                        ui.colored_label(
-                            Color32::from_rgb(235, 170, 70),
-                            format!("{cautions} marked 'caution' may break features (calls, SMS, updates, notifications)."),
-                        );
+                    if expert > 0 {
+                        ui.colored_label(removal_color(Removal::Expert), format!("{expert} 'expert' package(s) can break features."));
+                    }
+                    if unsafe_ > 0 {
+                        ui.colored_label(removal_color(Removal::Unsafe), format!("{unsafe_} 'unsafe' package(s) can cause a bootloop!"));
                     }
                     ui.horizontal(|ui| {
                         if ui.button("Yes").clicked() {
@@ -957,6 +1008,15 @@ impl Drop for App {
         if let Some(c) = &mut self.scrcpy.child {
             let _ = c.kill();
         }
+    }
+}
+
+fn removal_color(r: Removal) -> Color32 {
+    match r {
+        Removal::Recommended => Color32::from_rgb(110, 200, 120),
+        Removal::Advanced => Color32::from_rgb(235, 190, 70),
+        Removal::Expert => Color32::from_rgb(235, 130, 60),
+        Removal::Unsafe => Color32::from_rgb(230, 80, 80),
     }
 }
 
