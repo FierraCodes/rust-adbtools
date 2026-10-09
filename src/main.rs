@@ -1,11 +1,14 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod adb;
 mod debloat;
+mod platform;
 
 use adb::{Device, Package};
 use debloat::Removal;
 use eframe::egui::{self, Color32, RichText};
 use std::collections::{BTreeSet, HashMap};
-use std::process::{Child, Command};
+use std::process::Child;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
@@ -168,7 +171,6 @@ impl App {
                 }
             });
         }
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         let mut app = App {
             tx,
             rx,
@@ -189,7 +191,7 @@ impl App {
             pair_addr: String::new(),
             pair_code: String::new(),
             apk_path: String::new(),
-            out_dir: home,
+            out_dir: platform::default_out_dir(),
             shell_cmd: String::new(),
             shell_out: String::new(),
             db: debloat::builtin(),
@@ -423,7 +425,7 @@ impl App {
     fn launch_scrcpy(&mut self) {
         let Some(s) = &self.serial else { return };
         let c = &self.scrcpy;
-        let mut cmd = Command::new("scrcpy");
+        let mut cmd = platform::command("scrcpy");
         cmd.args(["-s", s]);
         for (flag, val) in [
             ("--max-size", &c.max_size),
@@ -749,7 +751,7 @@ impl App {
             }
         });
         ui.label(
-            RichText::new("Removal is per-user and reversible: Apps → Removed → Restore. Actions are logged to ~/.config/rusty-adb/actions.log")
+            RichText::new("Removal is per-user and reversible: Apps → Removed → Restore. Actions are logged to actions.log in the app config folder")
                 .small()
                 .weak(),
         );
@@ -862,7 +864,7 @@ impl App {
         if list_cams {
             let serial = self.serial.clone();
             self.spawn(&ctx, move |tx| {
-                let mut cmd = Command::new("scrcpy");
+                let mut cmd = platform::command("scrcpy");
                 if let Some(s) = &serial {
                     cmd.args(["-s", s]);
                 }
@@ -875,7 +877,12 @@ impl App {
         }
         let c = &mut self.scrcpy;
         ui.group(|ui| {
-            ui.checkbox(&mut c.webcam, "Use as a webcam (Linux v4l2 virtual camera)");
+            ui.add_enabled(
+                cfg!(target_os = "linux"),
+                egui::Checkbox::new(&mut c.webcam, "Use as a webcam (Linux v4l2 virtual camera)"),
+            )
+            .on_disabled_hover_text("Needs v4l2loopback, which only exists on Linux. On macOS/Windows, mirror to a window and capture it with OBS.");
+            c.webcam &= cfg!(target_os = "linux");
             if c.webcam {
                 ui.horizontal(|ui| {
                     ui.label("Device:");
@@ -1007,7 +1014,7 @@ impl App {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let dest = format!("{}/screenshot_{ts}.png", self.out_dir);
+                    let dest = std::path::Path::new(&self.out_dir).join(format!("screenshot_{ts}.png")).display().to_string();
                     self.spawn(&ctx, move |tx| {
                         let _ = tx.send(Msg::Log(match adb::screenshot(&s, &dest) {
                             Ok(p) => format!("saved {p}"),

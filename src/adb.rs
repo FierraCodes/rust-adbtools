@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Clone, Debug)]
 pub struct Device {
@@ -30,7 +30,7 @@ pub struct Package {
 
 /// Run `adb [-s serial] args...` and return stdout (or stderr text on failure).
 pub fn run(serial: Option<&str>, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("adb");
+    let mut cmd = crate::platform::command("adb");
     if let Some(s) = serial {
         cmd.args(["-s", s]);
     }
@@ -54,8 +54,7 @@ pub fn shell(serial: &str, cmd: &str) -> Result<String, String> {
 
 /// Append a record of a successful debloat action so it can be reviewed or reverted.
 pub fn log_action(serial: &str, pkg: &str, action: &str) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let dir = std::path::PathBuf::from(home).join(".config/rusty-adb");
+    let dir = crate::platform::config_dir();
     let _ = std::fs::create_dir_all(&dir);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -165,7 +164,7 @@ pub fn pull_apks(serial: &str, pkg: &str, dest: &str) -> Result<String, String> 
     let mut log = String::new();
     for p in paths.lines().filter_map(|l| l.trim().strip_prefix("package:")) {
         let file = p.rsplit('/').next().unwrap_or("base.apk");
-        let local = format!("{dest}/{pkg}_{file}");
+        let local = std::path::Path::new(dest).join(format!("{pkg}_{file}")).display().to_string();
         run(Some(serial), &["pull", p, &local])?;
         log.push_str(&format!("{local}\n"));
     }
@@ -173,7 +172,7 @@ pub fn pull_apks(serial: &str, pkg: &str, dest: &str) -> Result<String, String> 
 }
 
 pub fn screenshot(serial: &str, dest: &str) -> Result<String, String> {
-    let out = Command::new("adb")
+    let out = crate::platform::command("adb")
         .args(["-s", serial, "exec-out", "screencap", "-p"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -185,8 +184,7 @@ pub fn screenshot(serial: &str, dest: &str) -> Result<String, String> {
 }
 
 fn cache_path(pkg: &str) -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(home).join(".cache/rusty-adb/icons").join(format!("{pkg}.png"))
+    crate::platform::cache_dir().join("icons").join(format!("{pkg}.png"))
 }
 
 fn icon_score(name: &str) -> Option<i32> {

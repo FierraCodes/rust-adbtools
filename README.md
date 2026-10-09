@@ -8,7 +8,7 @@
 
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white)
 ![GUI](https://img.shields.io/badge/GUI-egui%20%2F%20eframe-blue)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?logo=linux&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![ADB](https://img.shields.io/badge/requires-adb-3DDC84?logo=android&logoColor=white)
 ![scrcpy](https://img.shields.io/badge/requires-scrcpy-informational)
@@ -38,7 +38,7 @@ phone's camera into a Linux webcam, all without memorising commands.
 - Choose **Uninstall for user 0** (reversible) or **Disable**
 - Confirmation dialog warns about expert and unsafe removals
 - **Export / import** selections so you can reuse a debloat profile across devices
-- Every action is logged to `~/.config/rusty-adb/actions.log`
+- Every action is logged to `the app config folder (see README)`
 - Built-in fallback list when you're offline
 
 ### 🖥 Mirror (scrcpy)
@@ -67,11 +67,15 @@ phone's camera into a Linux webcam, all without memorising commands.
 | `scrcpy` 2.2 or newer | mirroring and camera (camera mirroring also needs Android 12+) |
 | `v4l2loopback` *(optional)* | the webcam feature |
 
-On Arch Linux:
+| OS | Install adb and scrcpy |
+|---|---|
+| Arch Linux | `sudo pacman -S android-tools scrcpy` |
+| Debian / Ubuntu | `sudo apt install adb scrcpy` |
+| macOS | `brew install android-platform-tools scrcpy` |
+| Windows | `winget install Genymobile.scrcpy` (it bundles `adb`), or `scoop install adb scrcpy` |
 
-```bash
-sudo pacman -S android-tools scrcpy
-```
+Rusty ADB looks for `adb` and `scrcpy` on your `PATH`, and also in Homebrew's folders and the
+default Android SDK `platform-tools` folders, so it works when launched from Finder or the Start menu.
 
 ### Build & install
 
@@ -81,17 +85,23 @@ cd rust-adbtools
 ./install.sh
 ```
 
-`install.sh` builds a release binary and installs, for your user only:
+**Linux:** `install.sh` builds a release binary and installs, for your user only:
 
 - `~/.local/bin/rusty-adb`
 - the icon into `~/.local/share/icons/hicolor/`
 - a launcher entry in `~/.local/share/applications/`
 
-Make sure `~/.local/bin` is on your `PATH`. To just run it from source:
+Make sure `~/.local/bin` is on your `PATH`.
+
+**macOS / Windows (and Linux without the script):** build and run with Cargo:
 
 ```bash
-cargo run --release
+cargo run --release          # run from source
+cargo install --path .       # or install the binary into ~/.cargo/bin
 ```
+
+Pre-built binaries for all three platforms are produced by the GitHub Actions workflow
+(download them from the **Actions** tab, or from **Releases** for tagged versions).
 
 ### Connecting a device
 
@@ -101,7 +111,10 @@ cargo run --release
 
 For wireless debugging, use the **Tools** tab to pair and connect.
 
-## 📷 Using your phone as a webcam
+## 📷 Using your phone as a webcam (Linux)
+
+The virtual-webcam output relies on `v4l2loopback`, so it is **Linux only**. On macOS and Windows the
+camera and screen still mirror to a window; capture that window in OBS if you need a virtual camera.
 
 Load the virtual camera module once (it needs root):
 
@@ -127,17 +140,17 @@ cause a bootloop.
 
 ## 🗂 Where things are stored
 
-| Path | Contents |
-|---|---|
-| `~/.cache/rusty-adb/uad_lists.json` | cached debloat list |
-| `~/.cache/rusty-adb/icons/` | cached app icons |
-| `~/.config/rusty-adb/actions.log` | log of uninstall / disable / enable / restore actions |
+| What | Linux | macOS | Windows |
+|---|---|---|---|
+| Cache (`uad_lists.json`, `icons/`) | `~/.cache/rusty-adb` | `~/Library/Caches/rusty-adb` | `%LOCALAPPDATA%\rusty-adb` |
+| Config (`actions.log`, a log of uninstall / disable / enable / restore actions) | `~/.config/rusty-adb` | `~/Library/Application Support/rusty-adb` | `%APPDATA%\rusty-adb` |
 
 ## 🧱 Project layout
 
 ```
 src/
 ├── main.rs      # egui app: tabs, state, background tasks
+├── platform.rs  # OS helpers: data dirs, finding adb/scrcpy, no console flash on Windows
 ├── adb.rs       # adb wrapper: devices, packages, icons, pulls, action log
 └── debloat.rs   # UAD-ng list loading, caching and the offline fallback
 assets/          # icon (SVG + PNG) and .desktop entry

@@ -50,8 +50,7 @@ pub fn parse(json: &str) -> Result<Db, String> {
 }
 
 fn cache_file() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(home).join(".cache/rusty-adb/uad_lists.json")
+    crate::platform::cache_dir().join("uad_lists.json")
 }
 
 /// Cached list and whether it is old enough (or missing) to warrant a re-download.
