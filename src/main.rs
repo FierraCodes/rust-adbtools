@@ -109,6 +109,7 @@ struct App {
     icons: HashMap<String, IconState>,
     icon_tx: Sender<(String, String, String)>,
     ctx: egui::Context,
+    logo: egui::TextureHandle,
 }
 
 impl App {
@@ -171,6 +172,14 @@ impl App {
             icons: HashMap::new(),
             icon_tx,
             ctx: ctx.clone(),
+            logo: {
+                let i = app_icon();
+                let img = egui::ColorImage::from_rgba_unmultiplied(
+                    [i.width as usize, i.height as usize],
+                    &i.rgba,
+                );
+                ctx.load_texture("logo", img, egui::TextureOptions::LINEAR)
+            },
             scrcpy: Scrcpy {
                 max_size: String::new(),
                 bitrate: String::new(),
@@ -908,7 +917,8 @@ impl eframe::App for App {
 
         egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("🦀 Rusty ADB");
+                ui.add(egui::Image::new((self.logo.id(), egui::vec2(24.0, 24.0))));
+                ui.heading("Rusty ADB");
                 ui.separator();
                 let cur = self
                     .devices
